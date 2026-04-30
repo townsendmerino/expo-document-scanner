@@ -2,7 +2,7 @@ apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
 group = 'expo.modules.documentscanner'
-version = '0.1.0'
+version = '0.3.0'
 
 def expoModulesCorePlugin = new File(project(':expo-modules-core').projectDir.absolutePath, 'ExpoModulesCorePlugin.gradle')
 apply from: expoModulesCorePlugin
@@ -40,7 +40,7 @@ android {
 }
 
 dependencies {
-  // ML Kit Document Scanner (Google Play Services). Bundles its own scanning
-  // UI, edge detection, and perspective correction.
-  implementation 'com.google.android.gms:play-services-mlkit-document-scanner:16.0.0-beta1'
+  // FileProvider — required for ACTION_IMAGE_CAPTURE on Android 7+ to hand
+  // the camera app a content URI it can write to.
+  implementation 'androidx.core:core-ktx:1.12.0'
 }

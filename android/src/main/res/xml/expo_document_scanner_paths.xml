@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+  <!-- Captured photos are written to <cache>/expo-document-scanner/ and exposed
+       to the camera app via this FileProvider. -->
+  <cache-path
+      name="expo-document-scanner-cache"
+      path="expo-document-scanner/" />
+</paths>

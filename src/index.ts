@@ -24,15 +24,17 @@ function getModule(): NativeExpoDocumentScanner {
 }
 
 /**
- * Detect a document in an existing image and return a perspective-corrected
- * crop as base64 JPEG.
+ * Read an image and return it as base64 JPEG.
  *
- * - **iOS**: Uses `VNDetectDocumentSegmentationRequest` + `CIPerspectiveCorrection`.
- * - **Android**: Not supported. Use {@link scanDocument} instead, which launches
- *   the ML Kit Document Scanner UI. Calling this on Android rejects with
- *   `UNSUPPORTED_PLATFORM`.
+ * - **iOS**: Detects a document with `VNDetectDocumentSegmentationRequest`
+ *   and returns a perspective-corrected crop. `detected: true` if the warp
+ *   succeeded, `detected: false` with the orientation-normalized original
+ *   image if no document was found.
+ * - **Android**: Reads the file (or content URI) and returns its bytes
+ *   unmodified. Always resolves with `detected: false`.
  *
- * @param imageUri Local file URI (with or without `file://` prefix).
+ * @param imageUri Local file URI (with or without `file://` prefix), or
+ *   a `content://` URI on Android.
  */
 export function cropDocument(imageUri: string): Promise<CropResult> {
   return getModule().cropDocument(imageUri);
@@ -43,17 +45,20 @@ export function cropDocument(imageUri: string): Promise<CropResult> {
  * crop as base64 JPEG. Resolves with `{ detected: false, base64: '' }` if the
  * user cancels.
  *
- * - **iOS**: Presents the system `UIImagePickerController` (simple shutter +
- *   "Use Photo / Retake" flow), then runs the same Vision document
- *   segmentation + perspective correction pipeline as {@link cropDocument}.
- *   Requires `NSCameraUsageDescription` in the consumer app's `Info.plist`.
- * - **Android**: Launches Google ML Kit's bundled Document Scanner activity,
- *   which handles capture, edge detection, and perspective correction in one
- *   flow. Requires Google Play Services.
+ * - **iOS**: Custom `AVCaptureSession` scanner with live document detection,
+ *   a light-yellow overlay highlighting the detected quad, and auto-shutter
+ *   after ~0.8s of stable framing (manual shutter button as fallback). The
+ *   captured image runs through the same Vision document segmentation +
+ *   perspective correction pipeline as {@link cropDocument}. Portrait-locked.
+ *   Returns `detected: true` if the warp succeeded. Requires
+ *   `NSCameraUsageDescription` in the consumer app's `Info.plist`.
+ * - **Android**: Launches the system camera via `ACTION_IMAGE_CAPTURE`.
+ *   Returns the captured photo unmodified — no on-device detection or
+ *   cropping. Always resolves with `detected: false` (the field's name
+ *   refers to "document detected", which this Android path skips).
  *
- * Note: the two platforms intentionally use different UIs — iOS gets a
- * minimal "tap shutter" experience, Android gets ML Kit's full live-detection
- * scanner. Both return the same `CropResult` shape.
+ * Both platforms return the same `CropResult` shape; the asymmetry is in
+ * what `detected` means and whether the image is cropped.
  */
 export function scanDocument(): Promise<CropResult> {
   return getModule().scanDocument();

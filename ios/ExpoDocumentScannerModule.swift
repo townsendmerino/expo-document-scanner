@@ -1,12 +1,13 @@
 import ExpoModulesCore
 import Vision
 import CoreImage
+import AVFoundation
 import UIKit
 
 public class ExpoDocumentScannerModule: Module {
-  // Held for the duration of a scanDocument() call so the delegate isn't
-  // deallocated while the camera is on-screen (UIKit uses weak delegates).
-  private var activePickerDelegate: PickerDelegate?
+  // Held for the duration of a scanDocument() call so the live scanner view
+  // controller isn't deallocated while it's on-screen.
+  private var activeScanner: LiveScannerViewController?
 
   public func definition() -> ModuleDefinition {
     Name("ExpoDocumentScanner")
@@ -24,7 +25,7 @@ public class ExpoDocumentScannerModule: Module {
 
     AsyncFunction("scanDocument") { (promise: Promise) in
       DispatchQueue.main.async {
-        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+        guard AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) != nil else {
           promise.reject(
             "CAMERA_UNAVAILABLE",
             "Camera is not available on this device (e.g. running in the simulator)"
@@ -37,36 +38,34 @@ public class ExpoDocumentScannerModule: Module {
           return
         }
 
-        if self.activePickerDelegate != nil {
+        if self.activeScanner != nil {
           promise.reject("ALREADY_RUNNING", "A document scan is already in progress")
           return
         }
 
-        let picker = UIImagePickerController()
-        picker.sourceType = .camera
-        picker.cameraCaptureMode = .photo
-        picker.allowsEditing = false
-        picker.modalPresentationStyle = .fullScreen
+        let scanner = LiveScannerViewController()
+        scanner.modalPresentationStyle = .fullScreen
 
-        let delegate = PickerDelegate(
-          onImage: { [weak self] image in
-            guard let self = self else { return }
-            self.activePickerDelegate = nil
+        scanner.onCapture = { [weak self] image in
+          guard let self = self else { return }
+          // Dismiss first, then run the (potentially slow) Vision pipeline.
+          scanner.dismiss(animated: true) {
+            self.activeScanner = nil
             self.processImage(image, promise: promise)
-          },
-          onCancel: { [weak self] in
-            guard let self = self else { return }
-            self.activePickerDelegate = nil
+          }
+        }
+        scanner.onCancel = { [weak self] in
+          guard let self = self else { return }
+          scanner.dismiss(animated: true) {
+            self.activeScanner = nil
             // Treat cancel as "no document" rather than rejecting, mirroring
             // the Android behavior.
             promise.resolve(["detected": false, "base64": ""])
           }
-        )
+        }
 
-        picker.delegate = delegate
-        self.activePickerDelegate = delegate
-
-        rootVC.present(picker, animated: true)
+        self.activeScanner = scanner
+        rootVC.present(scanner, animated: true)
       }
     }
   }
@@ -149,39 +148,6 @@ public class ExpoDocumentScannerModule: Module {
       top = presented
     }
     return top
-  }
-}
-
-// MARK: - UIImagePickerController delegate
-
-private final class PickerDelegate: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-  private let onImage: (UIImage) -> Void
-  private let onCancel: () -> Void
-
-  init(onImage: @escaping (UIImage) -> Void, onCancel: @escaping () -> Void) {
-    self.onImage = onImage
-    self.onCancel = onCancel
-    super.init()
-  }
-
-  func imagePickerController(
-    _ picker: UIImagePickerController,
-    didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
-  ) {
-    let image = (info[.originalImage] as? UIImage)
-    picker.dismiss(animated: true) { [onImage, onCancel] in
-      if let image = image {
-        onImage(image)
-      } else {
-        onCancel()
-      }
-    }
-  }
-
-  func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-    picker.dismiss(animated: true) { [onCancel] in
-      onCancel()
-    }
   }
 }
 

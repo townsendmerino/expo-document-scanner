@@ -1,13 +1,13 @@
 # expo-document-scanner
 
-An Expo native module for capturing, detecting, and perspective-correcting documents.
+An Expo native module for capturing documents — with on-device detection on iOS and a deliberately simple "just take a picture" path on Android.
 
-- **iOS**: Apple's [Vision framework][vision] (`VNDetectDocumentSegmentationRequest`) for document detection and `CIPerspectiveCorrection` for the warp. Camera capture uses the system `UIImagePickerController`.
-- **Android**: Google's [ML Kit Document Scanner][mlkit] for the full bundled scan flow.
+- **iOS**: Custom `AVCaptureSession` UI with live document detection (Apple's Vision framework: `VNDetectDocumentSegmentationRequest`), a light-yellow overlay drawing the detected quad, auto-shutter, and `CIPerspectiveCorrection` to warp the captured frame to a clean rectangle.
+- **Android**: System camera intent (`MediaStore.ACTION_IMAGE_CAPTURE`) — captures a photo and returns it base64-encoded with no on-device processing. Designed for handing the raw image to a downstream model (e.g. Gemini, GPT-4V) that does its own OCR and layout analysis.
 
 ## Status
 
-Pre-1.0. Both platforms expose `scanDocument()` and `cropDocument(uri)`, but they intentionally use different camera UIs — see [Platform UI differences](#platform-ui-differences).
+Pre-1.0. iOS does on-device detection + cropping; Android intentionally does not (see [Platform behavior](#platform-behavior) below).
 
 ## Install
 
@@ -24,42 +24,41 @@ npx expo prebuild
 cd ios && pod install
 ```
 
-iOS minimum: **15.0**. Android minimum SDK: **21**. The Android module requires Google Play Services.
+iOS minimum: **15.0**. Android minimum SDK: **21**. No Play Services dependency.
 
 ### Permissions
 
-- **iOS**: `scanDocument()` opens the system camera, so the consumer app's `Info.plist` must include `NSCameraUsageDescription`. `cropDocument(uri)` operates on a file URI you provide and does not require any Info.plist keys on its own.
-- **Android**: ML Kit's Document Scanner handles its own camera permission prompt at runtime. No manifest changes required.
+- **iOS**: `scanDocument()` opens the camera, so the consumer app's `Info.plist` must include `NSCameraUsageDescription`. `cropDocument(uri)` operates on a file URI you provide and does not require any Info.plist keys on its own.
+- **Android**: `scanDocument()` launches the system camera via `ACTION_IMAGE_CAPTURE`, which has its own permission flow handled by the camera app. The module does not declare `<uses-permission android:name="android.permission.CAMERA"/>`. The module ships its own `FileProvider` (authority `${applicationId}.expodocumentscannerfileprovider`) so no consumer-side manifest changes are needed.
 
 ## Usage
 
 ```ts
 import { cropDocument, scanDocument } from 'expo-document-scanner';
 
-// Capture + crop in one call (works on both platforms)
-const result = await scanDocument();
-if (result.detected) {
-  console.log('Cropped JPEG (base64):', result.base64.slice(0, 32), '...');
-}
+// Capture + return image (works on both platforms)
+const { detected, base64 } = await scanDocument();
+// On iOS, `detected` is true if Vision found a document and the image was cropped.
+// On Android, `detected` is always false — the image is the raw camera capture.
+// Either way, `base64` contains a JPEG ready to send to your model.
 
-// Or, if you already have a photo (iOS only), just run the crop pipeline
-const cropped = await cropDocument(photo.uri);
+// Or, if you already have a photo, just hand it back as base64
+const result = await cropDocument(photo.uri);
 ```
 
 ### `scanDocument(): Promise<CropResult>`
 
-Opens a camera, captures a photo, and returns a perspective-corrected JPEG as base64. Resolves with `{ detected: false, base64: '' }` if the user cancels.
+Opens a camera and returns the captured image as base64 JPEG. Resolves with `{ detected: false, base64: '' }` if the user cancels.
 
-- **iOS**: Presents `UIImagePickerController` (system camera with shutter + "Use Photo / Retake"), then runs the captured image through the same Vision pipeline as `cropDocument`.
-- **Android**: Launches ML Kit's bundled Document Scanner activity (live edge detection + auto-capture + corner adjustment + multi-page support; we return page 0).
+- **iOS**: Custom `AVCaptureSession`-based scanner with **live document detection**, a **light-yellow overlay** highlighting the detected document, and **auto-shutter** — when a document has been stably framed for ~0.8 seconds, the camera captures automatically. A manual shutter button is available as a fallback. The captured image is run through the same Vision document segmentation + perspective correction pipeline as `cropDocument`. Portrait-locked. `detected: true` means the warp succeeded.
+- **Android**: Launches the system camera via `ACTION_IMAGE_CAPTURE`. Whatever camera app the user has handles the actual capture UX (preview, shutter, retake). Returns the captured photo unmodified as base64. `detected` is always `false` — the module does no on-device detection or cropping.
 
 ### `cropDocument(imageUri: string): Promise<CropResult>`
 
-iOS only. Takes a local file URI (with or without `file://`), runs document segmentation, and returns a perspective-corrected JPEG as base64.
+Takes a local file URI (with or without `file://`) and returns the image as base64.
 
-If no document is detected, `detected` is `false` and `base64` contains the orientation-normalized original image so callers can still hand the bytes off downstream (OCR, LLM, etc.).
-
-On Android this rejects with `UNSUPPORTED_PLATFORM` — use `scanDocument()` instead.
+- **iOS**: Runs the same Vision document segmentation + `CIPerspectiveCorrection` pipeline used by `scanDocument`. Returns `detected: true` with the cropped JPEG, or `detected: false` with the orientation-normalized original if no document is found.
+- **Android**: Just reads the file (or content URI) and returns its bytes as base64 with `detected: false`. No detection or cropping.
 
 ### `CropResult`
 
@@ -70,24 +69,25 @@ interface CropResult {
 }
 ```
 
-## Platform UI differences
+## Platform behavior
 
-`scanDocument()` works on both platforms but the camera UX is intentionally different:
+The two platforms intentionally do different things:
 
-| | iOS (`UIImagePickerController`) | Android (ML Kit) |
+| | iOS | Android |
 |---|---|---|
-| Live edge detection on preview | No | Yes |
-| Auto-capture when document framed | No | Yes |
-| Manual corner adjustment screen | No | Yes |
-| Multi-page support | No | Yes (we return page 0) |
-| Built-in retake / confirm step | Yes | Yes |
+| Camera UI | Custom AVFoundation, portrait-locked | System camera (whatever app the user has) |
+| Live edge detection on preview | Yes (yellow quad overlay) | No |
+| Auto-shutter | Yes (~0.8s stable framing) | No (system camera handles capture) |
+| Manual shutter fallback | Yes (button on overlay) | n/a — system UI |
+| On-device document detection / cropping | Yes (Vision + perspective correction) | No — raw image only |
+| Multi-page support | No (single image) | No |
 
-iOS gets a minimal "tap shutter, confirm" experience; Android gets ML Kit's full scanner. Both return the same `CropResult` shape, so callers don't have to branch.
+The asymmetry is by design. iOS has Apple's Vision framework available system-wide, so it's effectively free to detect and crop on-device. Android's equivalent (ML Kit Document Scanner) ships its own scanning UI that doesn't compose well with a custom one, and adds a Play Services dependency. The simpler "just hand back the photo" approach keeps the Android side dependency-free and lets a downstream LLM handle layout interpretation.
 
 ## Roadmap
 
+- Optional Android-side detection / cropping (CameraX-based custom scanner) for parity, gated behind a flag
 - Multi-page scans (`pages: string[]` instead of a single base64)
-- Optional PDF result format (ML Kit supports it natively; iOS would use `PDFKit`)
 - File-URI return option to avoid round-tripping large base64 strings through the JS bridge
 
 ## Contributing
@@ -97,8 +97,8 @@ PRs welcome. The project layout follows the standard Expo module template:
 ```
 expo-document-scanner/
 ├── src/                # TypeScript surface
-├── ios/                # Swift module
-├── android/            # Kotlin module + Gradle config
+├── ios/                # Swift module + LiveScannerViewController
+├── android/            # Kotlin module + Gradle config + FileProvider
 ├── ExpoDocumentScanner.podspec
 ├── expo-module.config.json
 └── package.json
@@ -109,4 +109,3 @@ expo-document-scanner/
 MIT — see [LICENSE](./LICENSE).
 
 [vision]: https://developer.apple.com/documentation/vision/vndetectdocumentsegmentationrequest
-[mlkit]: https://developers.google.com/ml-kit/vision/doc-scanner
