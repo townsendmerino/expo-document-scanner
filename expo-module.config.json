@@ -1,0 +1,10 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": {
+    "modules": ["ExpoDocumentScannerModule"],
+    "podspecPath": "./ExpoDocumentScanner.podspec"
+  },
+  "android": {
+    "modules": ["expo.modules.documentscanner.ExpoDocumentScannerModule"]
+  }
+}

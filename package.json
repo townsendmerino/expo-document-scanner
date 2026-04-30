@@ -1,0 +1,46 @@
+{
+  "name": "expo-document-scanner",
+  "version": "0.1.0",
+  "description": "Expo module for document detection, perspective correction, and scanning. Uses Apple Vision on iOS and Google ML Kit Document Scanner on Android.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "license": "MIT",
+  "author": {
+    "name": "Francis Townsend-Merino",
+    "email": "townsendmerino@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/townsendmerino/expo-document-scanner.git"
+  },
+  "bugs": {
+    "url": "https://github.com/townsendmerino/expo-document-scanner/issues"
+  },
+  "homepage": "https://github.com/townsendmerino/expo-document-scanner#readme",
+  "keywords": [
+    "expo",
+    "expo-module",
+    "react-native",
+    "document-scanner",
+    "vision",
+    "ml-kit",
+    "perspective-correction",
+    "ios",
+    "android"
+  ],
+  "files": [
+    "src",
+    "ios",
+    "android",
+    "expo-module.config.json",
+    "ExpoDocumentScanner.podspec",
+    "LICENSE",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "expo": "*",
+    "expo-modules-core": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

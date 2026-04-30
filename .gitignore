@@ -1,0 +1,37 @@
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# TypeScript build output (we ship src directly)
+build/
+dist/
+*.tsbuildinfo
+
+# iOS / CocoaPods
+ios/Pods/
+ios/build/
+ios/*.xcworkspace
+ios/.xcode.env.local
+ios/DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Android / Gradle
+android/build/
+android/.gradle/
+android/.idea/
+android/local.properties
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# Expo
+.expo/
+.expo-shared/
