@@ -125,27 +125,38 @@ public class ExpoDocumentScannerModule: Module {
     maxDimension: Int,
     promise: Promise
   ) {
+    NSLog("%@", "[ExpoDocumentScanner] processImage: enter, original size=\(original.size)")
     let image = original.normalizedForVision()
+    NSLog("%@", "[ExpoDocumentScanner] processImage: normalized, size=\(image.size)")
     guard let cgImage = image.cgImage else {
+      NSLog("%@", "[ExpoDocumentScanner] processImage: NO CGIMAGE")
       promise.reject("INVALID_IMAGE", "No CGImage available")
       return
     }
+    NSLog("%@", "[ExpoDocumentScanner] processImage: cgImage \(cgImage.width)x\(cgImage.height)")
 
     DispatchQueue.global(qos: .userInitiated).async {
+      NSLog("%@", "[ExpoDocumentScanner] processImage: bg queue start")
+
       let request = VNDetectDocumentSegmentationRequest()
       let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up)
+      NSLog("%@", "[ExpoDocumentScanner] processImage: vision handler ready")
 
       do {
         try handler.perform([request])
       } catch {
+        NSLog("%@", "[ExpoDocumentScanner] processImage: vision FAILED - \(error.localizedDescription)")
         promise.reject("HANDLER_FAILED", error.localizedDescription)
         return
       }
+      NSLog("%@", "[ExpoDocumentScanner] processImage: vision performed, results=\(request.results?.count ?? 0)")
 
       let croppedImage: UIImage
       let detected: Bool
 
       if let obs = (request.results as? [VNRectangleObservation])?.first {
+        NSLog("%@", "[ExpoDocumentScanner] processImage: doc detected, confidence=\(obs.confidence)")
+
         // Apply perspective correction
         let w = CGFloat(cgImage.width), h = CGFloat(cgImage.height)
         let tl = CGPoint(x: obs.topLeft.x * w,     y: obs.topLeft.y * h)
@@ -155,6 +166,7 @@ public class ExpoDocumentScannerModule: Module {
 
         let ci = CIImage(cgImage: cgImage)
         guard let filter = CIFilter(name: "CIPerspectiveCorrection") else {
+          NSLog("%@", "[ExpoDocumentScanner] processImage: CIFilter unavailable")
           promise.reject("FILTER_FAILED", "CIPerspectiveCorrection unavailable")
           return
         }
@@ -163,30 +175,36 @@ public class ExpoDocumentScannerModule: Module {
         filter.setValue(CIVector(cgPoint: tr),  forKey: "inputTopRight")
         filter.setValue(CIVector(cgPoint: bl),  forKey: "inputBottomLeft")
         filter.setValue(CIVector(cgPoint: br),  forKey: "inputBottomRight")
+        NSLog("%@", "[ExpoDocumentScanner] processImage: CIFilter configured")
 
         guard let out = filter.outputImage,
               let cgOut = CIContext().createCGImage(out, from: out.extent) else {
+          NSLog("%@", "[ExpoDocumentScanner] processImage: warp FAILED")
           promise.reject("WARP_FAILED", "Perspective correction failed")
           return
         }
+        NSLog("%@", "[ExpoDocumentScanner] processImage: warp done, size=\(cgOut.width)x\(cgOut.height)")
         croppedImage = UIImage(cgImage: cgOut)
         detected = true
       } else {
-        // No document detected — return the orientation-normalized original.
+        NSLog("%@", "[ExpoDocumentScanner] processImage: no doc detected, using original")
         croppedImage = image
         detected = false
       }
 
-      // Optional downsample. Vision sees the full source for accurate
-      // detection; only the final encode is at the smaller size.
+      NSLog("%@", "[ExpoDocumentScanner] processImage: about to resize, maxDim=\(maxDimension), input=\(croppedImage.size)")
       let resultImage = Self.resizeIfNeeded(croppedImage, maxDimension: maxDimension)
+      NSLog("%@", "[ExpoDocumentScanner] processImage: resize done, output=\(resultImage.size)")
 
       guard let jpeg = resultImage.jpegData(compressionQuality: CGFloat(jpegQuality)) else {
+        NSLog("%@", "[ExpoDocumentScanner] processImage: jpeg encode FAILED")
         promise.reject("ENCODE_FAILED", "Could not encode image")
         return
       }
+      NSLog("%@", "[ExpoDocumentScanner] processImage: jpeg encoded, bytes=\(jpeg.count)")
 
       Self.deliver(jpeg: jpeg, detected: detected, output: output, promise: promise)
+      NSLog("%@", "[ExpoDocumentScanner] processImage: deliver returned")
     }
   }
 
