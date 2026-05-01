@@ -2,7 +2,7 @@
 
 An Expo native module for capturing documents — with on-device detection on iOS and a deliberately simple "just take a picture" path on Android.
 
-- **iOS**: Custom `AVCaptureSession` UI with live document detection (Apple's Vision framework: `VNDetectDocumentSegmentationRequest`), a light-yellow overlay drawing the detected quad, auto-shutter, and `CIPerspectiveCorrection` to warp the captured frame to a clean rectangle.
+- **iOS**: Custom `AVCaptureSession` UI with live document detection (Apple's Vision framework: `VNDetectDocumentSegmentationRequest`) driving auto-shutter, and `CIPerspectiveCorrection` to warp the captured frame to a clean rectangle.
 - **Android**: System camera intent (`MediaStore.ACTION_IMAGE_CAPTURE`) — captures a photo and returns it base64-encoded with no on-device processing. Designed for handing the raw image to a downstream model (e.g. Gemini, GPT-4V) that does its own OCR and layout analysis.
 
 ## Status
@@ -48,9 +48,8 @@ const { uri } = await scanDocument({ output: 'fileUri' });
 const result = await scanDocument({
   autoShutter: true,
   autoShutterMs: 2000,        // longer dwell before auto-fire
-  overlayColor: '#00FFAA',    // teal overlay
-  overlayOpacity: 0.35,
   jpegQuality: 0.85,
+  maxDimension: 1560,         // cap longest edge — small OCR payloads
 });
 
 // Process an existing photo without launching a camera:
@@ -61,7 +60,7 @@ const cropped = await cropDocument(photo.uri);
 
 Opens a camera and returns the captured image. Resolves with `{ detected: false, base64: '', uri: '' }` if the user cancels.
 
-- **iOS**: Custom `AVCaptureSession`-based scanner with **live document detection**, a **colored overlay** highlighting the detected document, and **auto-shutter** — when a document has been stably framed for the configured dwell time, the camera captures automatically. A manual shutter button is available as a fallback. The captured image is run through the same Vision document segmentation + perspective correction pipeline as `cropDocument`. Portrait-locked. `detected: true` means the warp succeeded.
+- **iOS**: Custom `AVCaptureSession`-based scanner with **live document detection** driving **auto-shutter** — when a document has been stably framed for the configured dwell time, the camera captures automatically. A manual shutter button is available as a fallback. The captured image is run through the same Vision document segmentation + perspective correction pipeline as `cropDocument`. Portrait-locked. `detected: true` means the warp succeeded.
 - **Android**: Launches the system camera via `ACTION_IMAGE_CAPTURE`. Whatever camera app the user has handles the actual capture UX (preview, shutter, retake). Returns the captured photo unmodified. `detected` is always `false` — the module does no on-device detection or cropping. The non-UI options (`autoShutter*`, `overlay*`) are ignored.
 
 ### `cropDocument(imageUri, options?): Promise<CropResult>`
@@ -81,6 +80,13 @@ interface CommonOptions {
   jpegQuality?: number;
   /** How the result is delivered. Default: 'base64'. */
   output?: ScanOutput;
+  /**
+   * If set, downsample so longest edge ≤ this many pixels. Useful for
+   * keeping OCR payloads small. Vision still runs on the full source —
+   * only the final encode is resized. Default: unset (no resize).
+   * iOS only; Android currently ignores.
+   */
+  maxDimension?: number;
 }
 
 interface ScanOptions extends CommonOptions {
@@ -88,14 +94,25 @@ interface ScanOptions extends CommonOptions {
   autoShutter?: boolean;
   /** Stable-framing dwell before auto-shutter fires, in ms. Default: 1500. */
   autoShutterMs?: number;
-  /** Overlay fill/stroke color, #RRGGBB. Default: '#FFFF00'. */
-  overlayColor?: string;
-  /** Overlay fill opacity 0–1 (stroke is always full). Default: 0.25. */
-  overlayOpacity?: number;
 }
 
 type CropOptions = CommonOptions;
 ```
+
+### `maxDimension`
+
+If your downstream OCR / vision model doesn't need full-resolution input (most don't), capping the longest edge dramatically reduces the JPEG size with no quality cost for typical OCR. Vision detection still runs on the full source for accurate corner detection — only the final encode is resized, using high-quality interpolation (Lanczos on iOS).
+
+For typical iPad rear-camera capture (~5–7 megapixels after Vision crop) and Gemini OCR:
+
+| `maxDimension` | Encoded JPEG (q=0.9) | Notes |
+|---|---|---|
+| unset | 3–5 MB | Original behavior |
+| 1880 | ~250–400 KB | Conservative; preserves fine handwriting detail |
+| 1560 | ~150–250 KB | Matches Gemini's recommended input size |
+| 1024 | ~80–120 KB | Aggressive; still fine for most printed/handwritten text |
+
+Currently iOS only. On Android the option is accepted for API symmetry but ignored — Android delegates to the system camera and would need an extra decode/encode cycle to honor the option, which we'll add when Android grows beyond a passthrough.
 
 ### `output: 'fileUri'`
 
@@ -127,9 +144,8 @@ The two platforms intentionally do different things:
 | | iOS | Android |
 |---|---|---|
 | Camera UI | Custom AVFoundation, portrait-locked | System camera (whatever app the user has) |
-| Live edge detection on preview | Yes (yellow quad overlay) | No |
-| Auto-shutter | Yes (~0.8s stable framing) | No (system camera handles capture) |
-| Manual shutter fallback | Yes (button on overlay) | n/a — system UI |
+| Auto-shutter on stable framing | Yes (~1.5s default, configurable) | No (system camera handles capture) |
+| Manual shutter fallback | Yes | n/a — system UI |
 | On-device document detection / cropping | Yes (Vision + perspective correction) | No — raw image only |
 | Multi-page support | No (single image) | No |
 

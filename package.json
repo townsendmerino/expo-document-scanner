@@ -1,6 +1,6 @@
 {
   "name": "expo-document-scanner",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "description": "Expo module for capturing documents. iOS uses Apple Vision for live detection, perspective correction, and auto-shutter. Android uses the system camera intent and returns the raw image for downstream processing.",
   "main": "src/index.ts",
   "types": "src/index.ts",

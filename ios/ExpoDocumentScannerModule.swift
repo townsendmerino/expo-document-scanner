@@ -9,15 +9,17 @@ import UIKit
 struct ScanDocumentOptions: Record {
   @Field var autoShutter: Bool = true
   @Field var autoShutterMs: Int = 1500
-  @Field var overlayColor: String = "#FFFF00"
-  @Field var overlayOpacity: Double = 0.25
   @Field var jpegQuality: Double = 0.9
   @Field var output: String = "base64"
+  /// 0 = disabled (keep full resolution); >0 = cap longest edge at this many pixels.
+  @Field var maxDimension: Int = 0
 }
 
 struct CropDocumentOptions: Record {
   @Field var jpegQuality: Double = 0.9
   @Field var output: String = "base64"
+  /// 0 = disabled (keep full resolution); >0 = cap longest edge at this many pixels.
+  @Field var maxDimension: Int = 0
 }
 
 // MARK: - Internal value types
@@ -49,7 +51,8 @@ public class ExpoDocumentScannerModule: Module {
 
       let outputMode = ScanOutputMode.from(options.output)
       let quality = Self.clampUnit(options.jpegQuality)
-      self.processImage(original, output: outputMode, jpegQuality: quality, promise: promise)
+      let maxDim = max(0, options.maxDimension)
+      self.processImage(original, output: outputMode, jpegQuality: quality, maxDimension: maxDim, promise: promise)
     }
 
     AsyncFunction("scanDocument") { (options: ScanDocumentOptions, promise: Promise) in
@@ -72,23 +75,19 @@ public class ExpoDocumentScannerModule: Module {
           return
         }
 
-        // Translate JS options into the scanner's internal config.
-        let strokeColor = UIColor.fromHex(options.overlayColor) ?? .yellow
-        let fillColor = strokeColor.withAlphaComponent(CGFloat(Self.clampUnit(options.overlayOpacity)))
-        // Convert milliseconds to a frame count assuming ~30 fps. The video
-        // pipeline isn't strictly 30 fps but it's close enough for UX dwell.
+        // Translate JS options into the scanner's internal config. The
+        // video pipeline isn't strictly 30 fps but it's close enough for
+        // UX dwell calculations.
         let frames = max(1, Int((Double(options.autoShutterMs) / 1000.0) * 30.0))
 
         let config = LiveScannerConfig(
           autoShutter: options.autoShutter,
-          autoShutterFrames: frames,
-          overlayFillColor: fillColor,
-          overlayStrokeColor: strokeColor,
-          overlayLineWidth: 2
+          autoShutterFrames: frames
         )
 
         let outputMode = ScanOutputMode.from(options.output)
         let quality = Self.clampUnit(options.jpegQuality)
+        let maxDim = max(0, options.maxDimension)
 
         let scanner = LiveScannerViewController(config: config)
         scanner.modalPresentationStyle = .fullScreen
@@ -98,7 +97,7 @@ public class ExpoDocumentScannerModule: Module {
           // Dismiss first, then run the (potentially slow) Vision pipeline.
           scanner.dismiss(animated: true) {
             self.activeScanner = nil
-            self.processImage(image, output: outputMode, jpegQuality: quality, promise: promise)
+            self.processImage(image, output: outputMode, jpegQuality: quality, maxDimension: maxDim, promise: promise)
           }
         }
         scanner.onCancel = { [weak self] in
@@ -123,6 +122,7 @@ public class ExpoDocumentScannerModule: Module {
     _ original: UIImage,
     output: ScanOutputMode,
     jpegQuality: Double,
+    maxDimension: Int,
     promise: Promise
   ) {
     let image = original.normalizedForVision()
@@ -142,7 +142,7 @@ public class ExpoDocumentScannerModule: Module {
         return
       }
 
-      let resultImage: UIImage
+      let croppedImage: UIImage
       let detected: Bool
 
       if let obs = (request.results as? [VNRectangleObservation])?.first {
@@ -169,13 +169,17 @@ public class ExpoDocumentScannerModule: Module {
           promise.reject("WARP_FAILED", "Perspective correction failed")
           return
         }
-        resultImage = UIImage(cgImage: cgOut)
+        croppedImage = UIImage(cgImage: cgOut)
         detected = true
       } else {
         // No document detected — return the orientation-normalized original.
-        resultImage = image
+        croppedImage = image
         detected = false
       }
+
+      // Optional downsample. Vision sees the full source for accurate
+      // detection; only the final encode is at the smaller size.
+      let resultImage = Self.resizeIfNeeded(croppedImage, maxDimension: maxDimension)
 
       guard let jpeg = resultImage.jpegData(compressionQuality: CGFloat(jpegQuality)) else {
         promise.reject("ENCODE_FAILED", "Could not encode image")
@@ -183,6 +187,29 @@ public class ExpoDocumentScannerModule: Module {
       }
 
       Self.deliver(jpeg: jpeg, detected: detected, output: output, promise: promise)
+    }
+  }
+
+  /// Downsample so the longest edge ≤ maxDimension. Returns the input
+  /// unchanged if maxDimension is 0 or the image is already small enough.
+  /// Uses .high interpolation, which on iOS is Lanczos for downsampling.
+  private static func resizeIfNeeded(_ image: UIImage, maxDimension: Int) -> UIImage {
+    guard maxDimension > 0 else { return image }
+    let size = image.size
+    let longest = max(size.width, size.height)
+    let cap = CGFloat(maxDimension)
+    if longest <= cap { return image }
+
+    let scale = cap / longest
+    let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+
+    let format = UIGraphicsImageRendererFormat.default()
+    // pixel-for-pixel render; ignore the device's @2x/@3x scale factor
+    format.scale = 1
+    let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+    return renderer.image { ctx in
+      ctx.cgContext.interpolationQuality = .high
+      image.draw(in: CGRect(origin: .zero, size: newSize))
     }
   }
 
@@ -254,21 +281,6 @@ public class ExpoDocumentScannerModule: Module {
       top = presented
     }
     return top
-  }
-}
-
-// MARK: - UIColor hex parser
-
-extension UIColor {
-  /// Parses `#RRGGBB`. Returns nil for any other format. Hex case-insensitive.
-  static func fromHex(_ hex: String) -> UIColor? {
-    var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
-    if s.hasPrefix("#") { s = String(s.dropFirst()) }
-    guard s.count == 6, let value = UInt32(s, radix: 16) else { return nil }
-    let r = CGFloat((value & 0xFF0000) >> 16) / 255.0
-    let g = CGFloat((value & 0x00FF00) >> 8)  / 255.0
-    let b = CGFloat( value & 0x0000FF)        / 255.0
-    return UIColor(red: r, green: g, blue: b, alpha: 1.0)
   }
 }
 

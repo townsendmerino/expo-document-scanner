@@ -6,13 +6,12 @@ import Vision
 struct LiveScannerConfig {
   var autoShutter: Bool = true
   var autoShutterFrames: Int = 45
-  var overlayFillColor: UIColor = UIColor.yellow.withAlphaComponent(0.25)
-  var overlayStrokeColor: UIColor = .yellow
-  var overlayLineWidth: CGFloat = 2
 }
 
-/// A simple full-screen camera with live document detection, auto-shutter,
-/// and a colored overlay highlighting the detected document.
+/// A simple full-screen camera with live document detection and
+/// auto-shutter. The user sees the standard camera viewfinder; once the
+/// detected document is stable for the configured dwell, the camera fires
+/// automatically. A manual shutter button is always available as a fallback.
 ///
 /// Result delivery is via the two callbacks. Exactly one is invoked.
 final class LiveScannerViewController: UIViewController {
@@ -58,16 +57,8 @@ final class LiveScannerViewController: UIViewController {
   /// value; tuning it is reserved for module maintainers.
   private let stabilityTolerance: CGFloat = 0.015
 
-  // MARK: Diagnostic logging
-
-  /// Frame counter used to gate diagnostic prints to roughly 1Hz.
-  private var loggedFrameCounter = 0
-  /// Print every Nth frame's data to the console. ~30fps → ~1 second.
-  private let logEveryNthFrame = 30
-
   // MARK: UI
 
-  private let overlayLayer = CAShapeLayer()
   private let captionLabel = UILabel()
   private let cancelButton = UIButton(type: .system)
   private let shutterButton = UIButton(type: .custom)
@@ -80,7 +71,7 @@ final class LiveScannerViewController: UIViewController {
     view.backgroundColor = .black
     setupSession()
     setupPreview()
-    setupOverlay()
+    setupFlashView()
     setupChrome()
   }
 
@@ -101,7 +92,6 @@ final class LiveScannerViewController: UIViewController {
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     previewLayer.frame = view.bounds
-    overlayLayer.frame = view.bounds
     flashView.frame = view.bounds
   }
 
@@ -176,14 +166,9 @@ final class LiveScannerViewController: UIViewController {
     }
   }
 
-  private func setupOverlay() {
-    overlayLayer.fillColor = config.overlayFillColor.cgColor
-    overlayLayer.strokeColor = config.overlayStrokeColor.cgColor
-    overlayLayer.lineWidth = config.overlayLineWidth
-    overlayLayer.lineJoin = .round
-    overlayLayer.frame = view.bounds
-    view.layer.addSublayer(overlayLayer)
-
+  /// White flash that briefly covers the view when capturePhoto fires —
+  /// gives the user immediate "we got the shot" feedback.
+  private func setupFlashView() {
     flashView.backgroundColor = .white
     flashView.alpha = 0
     flashView.isUserInteractionEnabled = false
@@ -299,76 +284,7 @@ final class LiveScannerViewController: UIViewController {
     photoOutput.capturePhoto(with: settings, delegate: self)
   }
 
-  // MARK: Overlay drawing
-
-  /// Maps a Vision-normalized corner (bottom-left origin) into preview-layer
-  /// view coordinates, accounting for .resizeAspectFill cropping. We bypass
-  /// AVCaptureVideoPreviewLayer.layerPointConverted(fromCaptureDevicePoint:)
-  /// entirely because its docs leave the coordinate-space semantics ambiguous
-  /// when the connection has rotation applied — this function is fully
-  /// deterministic given the actual buffer dimensions and the layer bounds.
-  private func toView(_ visionPoint: CGPoint, bufferSize: CGSize) -> CGPoint {
-    // Vision: bottom-left origin, normalized [0,1] → flip to top-left.
-    let nx = visionPoint.x
-    let ny = 1.0 - visionPoint.y
-
-    let layerSize = previewLayer.bounds.size
-    guard bufferSize.width > 0, bufferSize.height > 0,
-          layerSize.width > 0, layerSize.height > 0 else {
-      return .zero
-    }
-
-    // .resizeAspectFill: scale until the SHORTER dimension fills the layer,
-    // then crop the longer dimension. Each side gets cropped equally.
-    let scale = max(layerSize.width / bufferSize.width,
-                    layerSize.height / bufferSize.height)
-    let displayedW = bufferSize.width * scale
-    let displayedH = bufferSize.height * scale
-    let offsetX = (layerSize.width - displayedW) / 2
-    let offsetY = (layerSize.height - displayedH) / 2
-
-    return CGPoint(
-      x: offsetX + nx * displayedW,
-      y: offsetY + ny * displayedH
-    )
-  }
-
-  /// Draws the quad on screen using the manual transform above. When
-  /// `debugLog` is true, prints buffer dims, layer dims, and transformed
-  /// view points so we can correlate what's drawn with what Vision saw.
-  private func drawOverlay(
-    for observation: VNRectangleObservation?,
-    bufferSize: CGSize,
-    debugLog: Bool = false
-  ) {
-    guard let observation = observation else {
-      overlayLayer.path = nil
-      return
-    }
-
-    let tl = toView(observation.topLeft,    bufferSize: bufferSize)
-    let tr = toView(observation.topRight,   bufferSize: bufferSize)
-    let bl = toView(observation.bottomLeft, bufferSize: bufferSize)
-    let br = toView(observation.bottomRight, bufferSize: bufferSize)
-
-    if debugLog {
-      let f = previewLayer.frame
-      print(String(
-        format: "[ExpoDocumentScanner] view tl=(%.1f, %.1f) tr=(%.1f, %.1f) bl=(%.1f, %.1f) br=(%.1f, %.1f) preview=(%.1f, %.1f, %.1f x %.1f) buffer=%.0fx%.0f",
-        tl.x, tl.y, tr.x, tr.y, bl.x, bl.y, br.x, br.y,
-        f.origin.x, f.origin.y, f.width, f.height,
-        bufferSize.width, bufferSize.height
-      ))
-    }
-
-    let path = UIBezierPath()
-    path.move(to: tl)
-    path.addLine(to: tr)
-    path.addLine(to: br)
-    path.addLine(to: bl)
-    path.close()
-    overlayLayer.path = path.cgPath
-  }
+  // MARK: Caption
 
   private func updateCaption(detected: Bool, stableFrames: Int) {
     if hasCaptured { return }
@@ -397,18 +313,6 @@ extension LiveScannerViewController: AVCaptureVideoDataOutputSampleBufferDelegat
     if hasCaptured { return }
     guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-    loggedFrameCounter += 1
-    let shouldLog = (loggedFrameCounter % logEveryNthFrame) == 0
-
-    let bufferSize = CGSize(
-      width: CVPixelBufferGetWidth(pixelBuffer),
-      height: CVPixelBufferGetHeight(pixelBuffer)
-    )
-
-    if shouldLog {
-      print("[ExpoDocumentScanner] buffer=\(Int(bufferSize.width))x\(Int(bufferSize.height))")
-    }
-
     let request = VNDetectDocumentSegmentationRequest()
     let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
     do {
@@ -419,23 +323,9 @@ extension LiveScannerViewController: AVCaptureVideoDataOutputSampleBufferDelegat
 
     let observation = (request.results as? [VNRectangleObservation])?.first
 
-    if shouldLog, let obs = observation {
-      print(String(
-        format: "[ExpoDocumentScanner] obs tl=(%.3f, %.3f) tr=(%.3f, %.3f) bl=(%.3f, %.3f) br=(%.3f, %.3f) confidence=%.2f",
-        obs.topLeft.x, obs.topLeft.y,
-        obs.topRight.x, obs.topRight.y,
-        obs.bottomLeft.x, obs.bottomLeft.y,
-        obs.bottomRight.x, obs.bottomRight.y,
-        obs.confidence
-      ))
-    } else if shouldLog {
-      print("[ExpoDocumentScanner] obs (none detected)")
-    }
-
     DispatchQueue.main.async { [weak self] in
       guard let self = self else { return }
       self.updateStabilityCounter(with: observation)
-      self.drawOverlay(for: observation, bufferSize: bufferSize, debugLog: shouldLog)
       self.updateCaption(detected: observation != nil, stableFrames: self.stableFrameCount)
 
       if !self.hasCaptured,

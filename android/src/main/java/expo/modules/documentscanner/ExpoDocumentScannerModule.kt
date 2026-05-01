@@ -17,15 +17,19 @@ import java.net.URI
 class ScanDocumentOptions : Record {
   @Field var autoShutter: Boolean = true
   @Field var autoShutterMs: Int = 1500
-  @Field var overlayColor: String = "#FFFF00"
-  @Field var overlayOpacity: Double = 0.25
   @Field var jpegQuality: Double = 0.9
   @Field var output: String = "base64"
+  // Accepted for API symmetry with iOS. Currently ignored on Android —
+  // implementing requires a decode/scale/re-encode cycle in Kotlin which
+  // we'll add when Android grows beyond a system-camera passthrough.
+  @Field var maxDimension: Int = 0
 }
 
 class CropDocumentOptions : Record {
   @Field var jpegQuality: Double = 0.9
   @Field var output: String = "base64"
+  // Accepted for API symmetry with iOS. Currently ignored on Android.
+  @Field var maxDimension: Int = 0
 }
 
 class ExpoDocumentScannerModule : Module() {

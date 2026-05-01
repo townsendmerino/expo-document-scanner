@@ -17,22 +17,29 @@ export interface CommonOptions {
   jpegQuality?: number;
   /** How the result is delivered. Default: `'base64'`. */
   output?: ScanOutput;
+  /**
+   * If set, downsample the output so its longest edge is at most this
+   * many pixels. Useful for keeping OCR payloads small. Vision detection
+   * still runs on the full source — only the final encode is resized.
+   * Resampling uses high-quality interpolation (Lanczos on iOS).
+   * Default: unset (no resizing).
+   *
+   * Currently honored on iOS only. On Android the option is accepted
+   * (for API symmetry) but ignored.
+   */
+  maxDimension?: number;
 }
 
 /**
- * Options specific to `scanDocument` (the live-scanner UI). The non-UI
- * options (autoShutter*, overlay*) are honored on iOS and ignored on
- * Android (the Android scanner delegates to the system camera intent).
+ * Options specific to `scanDocument` (the live-scanner UI). These are
+ * honored on iOS and ignored on Android (the Android scanner delegates
+ * to the system camera intent which owns its own UX).
  */
 export interface ScanOptions extends CommonOptions {
   /** Whether the camera auto-captures when the document is steady. Default: `true`. */
   autoShutter?: boolean;
   /** Milliseconds the document must remain stable before auto-capture fires. Default: `1500`. */
   autoShutterMs?: number;
-  /** Overlay fill/stroke color in `#RRGGBB`. Default: `'#FFFF00'` (yellow). */
-  overlayColor?: string;
-  /** Fill opacity for the overlay quad, 0–1. Stroke is always full opacity. Default: `0.25`. */
-  overlayOpacity?: number;
 }
 
 /**
