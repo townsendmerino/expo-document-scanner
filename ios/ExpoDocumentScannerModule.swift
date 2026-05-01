@@ -4,6 +4,33 @@ import CoreImage
 import AVFoundation
 import UIKit
 
+// MARK: - Option records (Expo's mechanism for typed JS-side option dicts)
+
+struct ScanDocumentOptions: Record {
+  @Field var autoShutter: Bool = true
+  @Field var autoShutterMs: Int = 1500
+  @Field var overlayColor: String = "#FFFF00"
+  @Field var overlayOpacity: Double = 0.25
+  @Field var jpegQuality: Double = 0.9
+  @Field var output: String = "base64"
+}
+
+struct CropDocumentOptions: Record {
+  @Field var jpegQuality: Double = 0.9
+  @Field var output: String = "base64"
+}
+
+// MARK: - Internal value types
+
+enum ScanOutputMode {
+  case base64
+  case fileUri
+
+  static func from(_ raw: String) -> ScanOutputMode {
+    return raw == "fileUri" ? .fileUri : .base64
+  }
+}
+
 public class ExpoDocumentScannerModule: Module {
   // Held for the duration of a scanDocument() call so the live scanner view
   // controller isn't deallocated while it's on-screen.
@@ -12,7 +39,7 @@ public class ExpoDocumentScannerModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ExpoDocumentScanner")
 
-    AsyncFunction("cropDocument") { (imageUri: String, promise: Promise) in
+    AsyncFunction("cropDocument") { (imageUri: String, options: CropDocumentOptions, promise: Promise) in
       let path = imageUri.hasPrefix("file://") ? String(imageUri.dropFirst(7)) : imageUri
 
       guard let original = UIImage(contentsOfFile: path) else {
@@ -20,10 +47,12 @@ public class ExpoDocumentScannerModule: Module {
         return
       }
 
-      self.processImage(original, promise: promise)
+      let outputMode = ScanOutputMode.from(options.output)
+      let quality = Self.clampUnit(options.jpegQuality)
+      self.processImage(original, output: outputMode, jpegQuality: quality, promise: promise)
     }
 
-    AsyncFunction("scanDocument") { (promise: Promise) in
+    AsyncFunction("scanDocument") { (options: ScanDocumentOptions, promise: Promise) in
       DispatchQueue.main.async {
         guard AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) != nil else {
           promise.reject(
@@ -43,7 +72,25 @@ public class ExpoDocumentScannerModule: Module {
           return
         }
 
-        let scanner = LiveScannerViewController()
+        // Translate JS options into the scanner's internal config.
+        let strokeColor = UIColor.fromHex(options.overlayColor) ?? .yellow
+        let fillColor = strokeColor.withAlphaComponent(CGFloat(Self.clampUnit(options.overlayOpacity)))
+        // Convert milliseconds to a frame count assuming ~30 fps. The video
+        // pipeline isn't strictly 30 fps but it's close enough for UX dwell.
+        let frames = max(1, Int((Double(options.autoShutterMs) / 1000.0) * 30.0))
+
+        let config = LiveScannerConfig(
+          autoShutter: options.autoShutter,
+          autoShutterFrames: frames,
+          overlayFillColor: fillColor,
+          overlayStrokeColor: strokeColor,
+          overlayLineWidth: 2
+        )
+
+        let outputMode = ScanOutputMode.from(options.output)
+        let quality = Self.clampUnit(options.jpegQuality)
+
+        let scanner = LiveScannerViewController(config: config)
         scanner.modalPresentationStyle = .fullScreen
 
         scanner.onCapture = { [weak self] image in
@@ -51,16 +98,16 @@ public class ExpoDocumentScannerModule: Module {
           // Dismiss first, then run the (potentially slow) Vision pipeline.
           scanner.dismiss(animated: true) {
             self.activeScanner = nil
-            self.processImage(image, promise: promise)
+            self.processImage(image, output: outputMode, jpegQuality: quality, promise: promise)
           }
         }
         scanner.onCancel = { [weak self] in
           guard let self = self else { return }
           scanner.dismiss(animated: true) {
             self.activeScanner = nil
-            // Treat cancel as "no document" rather than rejecting, mirroring
-            // the Android behavior.
-            promise.resolve(["detected": false, "base64": ""])
+            // Mirror Android: cancel resolves with empty fields rather than
+            // rejecting, so callers can use `if (!base64 && !uri) cancel`.
+            promise.resolve(["detected": false, "base64": "", "uri": ""])
           }
         }
 
@@ -72,7 +119,12 @@ public class ExpoDocumentScannerModule: Module {
 
   // MARK: - Vision pipeline (shared between cropDocument and scanDocument)
 
-  private func processImage(_ original: UIImage, promise: Promise) {
+  private func processImage(
+    _ original: UIImage,
+    output: ScanOutputMode,
+    jpegQuality: Double,
+    promise: Promise
+  ) {
     let image = original.normalizedForVision()
     guard let cgImage = image.cgImage else {
       promise.reject("INVALID_IMAGE", "No CGImage available")
@@ -90,50 +142,104 @@ public class ExpoDocumentScannerModule: Module {
         return
       }
 
-      guard let obs = (request.results as? [VNRectangleObservation])?.first else {
-        // No document detected — return the orientation-normalized raw image.
-        guard let jpeg = image.jpegData(compressionQuality: 0.9) else {
-          promise.reject("ENCODE_FAILED", "Could not encode raw image")
+      let resultImage: UIImage
+      let detected: Bool
+
+      if let obs = (request.results as? [VNRectangleObservation])?.first {
+        // Apply perspective correction
+        let w = CGFloat(cgImage.width), h = CGFloat(cgImage.height)
+        let tl = CGPoint(x: obs.topLeft.x * w,     y: obs.topLeft.y * h)
+        let tr = CGPoint(x: obs.topRight.x * w,    y: obs.topRight.y * h)
+        let bl = CGPoint(x: obs.bottomLeft.x * w,  y: obs.bottomLeft.y * h)
+        let br = CGPoint(x: obs.bottomRight.x * w, y: obs.bottomRight.y * h)
+
+        let ci = CIImage(cgImage: cgImage)
+        guard let filter = CIFilter(name: "CIPerspectiveCorrection") else {
+          promise.reject("FILTER_FAILED", "CIPerspectiveCorrection unavailable")
           return
         }
-        promise.resolve(["detected": false, "base64": jpeg.base64EncodedString()])
+        filter.setValue(ci,                     forKey: kCIInputImageKey)
+        filter.setValue(CIVector(cgPoint: tl),  forKey: "inputTopLeft")
+        filter.setValue(CIVector(cgPoint: tr),  forKey: "inputTopRight")
+        filter.setValue(CIVector(cgPoint: bl),  forKey: "inputBottomLeft")
+        filter.setValue(CIVector(cgPoint: br),  forKey: "inputBottomRight")
+
+        guard let out = filter.outputImage,
+              let cgOut = CIContext().createCGImage(out, from: out.extent) else {
+          promise.reject("WARP_FAILED", "Perspective correction failed")
+          return
+        }
+        resultImage = UIImage(cgImage: cgOut)
+        detected = true
+      } else {
+        // No document detected — return the orientation-normalized original.
+        resultImage = image
+        detected = false
+      }
+
+      guard let jpeg = resultImage.jpegData(compressionQuality: CGFloat(jpegQuality)) else {
+        promise.reject("ENCODE_FAILED", "Could not encode image")
         return
       }
 
-      // Vision coords: bottom-left origin, normalized [0,1]
-      let w = CGFloat(cgImage.width), h = CGFloat(cgImage.height)
-      let tl = CGPoint(x: obs.topLeft.x * w,     y: obs.topLeft.y * h)
-      let tr = CGPoint(x: obs.topRight.x * w,    y: obs.topRight.y * h)
-      let bl = CGPoint(x: obs.bottomLeft.x * w,  y: obs.bottomLeft.y * h)
-      let br = CGPoint(x: obs.bottomRight.x * w, y: obs.bottomRight.y * h)
-
-      let ci = CIImage(cgImage: cgImage)
-      guard let filter = CIFilter(name: "CIPerspectiveCorrection") else {
-        promise.reject("FILTER_FAILED", "CIPerspectiveCorrection unavailable")
-        return
-      }
-      filter.setValue(ci,                     forKey: kCIInputImageKey)
-      filter.setValue(CIVector(cgPoint: tl),  forKey: "inputTopLeft")
-      filter.setValue(CIVector(cgPoint: tr),  forKey: "inputTopRight")
-      filter.setValue(CIVector(cgPoint: bl),  forKey: "inputBottomLeft")
-      filter.setValue(CIVector(cgPoint: br),  forKey: "inputBottomRight")
-
-      guard let out = filter.outputImage,
-            let cgOut = CIContext().createCGImage(out, from: out.extent) else {
-        promise.reject("WARP_FAILED", "Perspective correction failed")
-        return
-      }
-
-      guard let jpeg = UIImage(cgImage: cgOut).jpegData(compressionQuality: 0.9) else {
-        promise.reject("ENCODE_FAILED", "Could not encode cropped image")
-        return
-      }
-
-      promise.resolve(["detected": true, "base64": jpeg.base64EncodedString()])
+      Self.deliver(jpeg: jpeg, detected: detected, output: output, promise: promise)
     }
   }
 
+  // MARK: - Output delivery
+
+  /// Resolves the promise with either base64 or a file:// URI to a JPEG
+  /// at `<caches>/expo-document-scanner/scan.jpg`. The fixed filename
+  /// means each call overwrites the previous file — there's only ever
+  /// one scan on disk at a time, no cleanup logic required.
+  private static func deliver(jpeg: Data, detected: Bool, output: ScanOutputMode, promise: Promise) {
+    switch output {
+    case .base64:
+      promise.resolve([
+        "detected": detected,
+        "base64": jpeg.base64EncodedString(),
+        "uri": "",
+      ])
+
+    case .fileUri:
+      do {
+        let url = try scratchFileURL()
+        // Belt + suspenders: write atomically, also explicitly remove any
+        // prior file in case its perms or partial-write state would
+        // confuse readers.
+        try? FileManager.default.removeItem(at: url)
+        try jpeg.write(to: url, options: .atomic)
+        promise.resolve([
+          "detected": detected,
+          "base64": "",
+          "uri": url.absoluteString,
+        ])
+      } catch {
+        promise.reject("FILE_WRITE_FAILED", error.localizedDescription)
+      }
+    }
+  }
+
+  private static func scratchFileURL() throws -> URL {
+    let fm = FileManager.default
+    let cachesDir = try fm.url(
+      for: .cachesDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    )
+    let dir = cachesDir.appendingPathComponent("expo-document-scanner", isDirectory: true)
+    if !fm.fileExists(atPath: dir.path) {
+      try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+    return dir.appendingPathComponent("scan.jpg", isDirectory: false)
+  }
+
   // MARK: - Helpers
+
+  private static func clampUnit(_ x: Double) -> Double {
+    return max(0.0, min(1.0, x))
+  }
 
   /// Walks the active key window's view controller chain to find the topmost
   /// presented controller — that's what we present the camera from.
@@ -148,6 +254,21 @@ public class ExpoDocumentScannerModule: Module {
       top = presented
     }
     return top
+  }
+}
+
+// MARK: - UIColor hex parser
+
+extension UIColor {
+  /// Parses `#RRGGBB`. Returns nil for any other format. Hex case-insensitive.
+  static func fromHex(_ hex: String) -> UIColor? {
+    var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+    if s.hasPrefix("#") { s = String(s.dropFirst()) }
+    guard s.count == 6, let value = UInt32(s, radix: 16) else { return nil }
+    let r = CGFloat((value & 0xFF0000) >> 16) / 255.0
+    let g = CGFloat((value & 0x00FF00) >> 8)  / 255.0
+    let b = CGFloat( value & 0x0000FF)        / 255.0
+    return UIColor(red: r, green: g, blue: b, alpha: 1.0)
   }
 }
 

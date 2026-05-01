@@ -36,38 +36,89 @@ iOS minimum: **15.0**. Android minimum SDK: **21**. No Play Services dependency.
 ```ts
 import { cropDocument, scanDocument } from 'expo-document-scanner';
 
-// Capture + return image (works on both platforms)
+// Default — capture + return image as base64 (works on both platforms)
 const { detected, base64 } = await scanDocument();
-// On iOS, `detected` is true if Vision found a document and the image was cropped.
-// On Android, `detected` is always false — the image is the raw camera capture.
-// Either way, `base64` contains a JPEG ready to send to your model.
 
-// Or, if you already have a photo, just hand it back as base64
-const result = await cropDocument(photo.uri);
+// Or write to disk and get a file URI back (avoids round-tripping a big
+// base64 string through the JS bridge):
+const { uri } = await scanDocument({ output: 'fileUri' });
+
+// Customize the live-scanner UI (iOS only — Android delegates to the
+// system camera and ignores these):
+const result = await scanDocument({
+  autoShutter: true,
+  autoShutterMs: 2000,        // longer dwell before auto-fire
+  overlayColor: '#00FFAA',    // teal overlay
+  overlayOpacity: 0.35,
+  jpegQuality: 0.85,
+});
+
+// Process an existing photo without launching a camera:
+const cropped = await cropDocument(photo.uri);
 ```
 
-### `scanDocument(): Promise<CropResult>`
+### `scanDocument(options?): Promise<CropResult>`
 
-Opens a camera and returns the captured image as base64 JPEG. Resolves with `{ detected: false, base64: '' }` if the user cancels.
+Opens a camera and returns the captured image. Resolves with `{ detected: false, base64: '', uri: '' }` if the user cancels.
 
-- **iOS**: Custom `AVCaptureSession`-based scanner with **live document detection**, a **light-yellow overlay** highlighting the detected document, and **auto-shutter** — when a document has been stably framed for ~0.8 seconds, the camera captures automatically. A manual shutter button is available as a fallback. The captured image is run through the same Vision document segmentation + perspective correction pipeline as `cropDocument`. Portrait-locked. `detected: true` means the warp succeeded.
-- **Android**: Launches the system camera via `ACTION_IMAGE_CAPTURE`. Whatever camera app the user has handles the actual capture UX (preview, shutter, retake). Returns the captured photo unmodified as base64. `detected` is always `false` — the module does no on-device detection or cropping.
+- **iOS**: Custom `AVCaptureSession`-based scanner with **live document detection**, a **colored overlay** highlighting the detected document, and **auto-shutter** — when a document has been stably framed for the configured dwell time, the camera captures automatically. A manual shutter button is available as a fallback. The captured image is run through the same Vision document segmentation + perspective correction pipeline as `cropDocument`. Portrait-locked. `detected: true` means the warp succeeded.
+- **Android**: Launches the system camera via `ACTION_IMAGE_CAPTURE`. Whatever camera app the user has handles the actual capture UX (preview, shutter, retake). Returns the captured photo unmodified. `detected` is always `false` — the module does no on-device detection or cropping. The non-UI options (`autoShutter*`, `overlay*`) are ignored.
 
-### `cropDocument(imageUri: string): Promise<CropResult>`
+### `cropDocument(imageUri, options?): Promise<CropResult>`
 
-Takes a local file URI (with or without `file://`) and returns the image as base64.
+Takes a local file URI (with or without `file://`) and returns the image.
 
 - **iOS**: Runs the same Vision document segmentation + `CIPerspectiveCorrection` pipeline used by `scanDocument`. Returns `detected: true` with the cropped JPEG, or `detected: false` with the orientation-normalized original if no document is found.
-- **Android**: Just reads the file (or content URI) and returns its bytes as base64 with `detected: false`. No detection or cropping.
+- **Android**: Just reads the file (or content URI) and returns its bytes with `detected: false`. No detection or cropping.
+
+### Options
+
+```ts
+type ScanOutput = 'base64' | 'fileUri';
+
+interface CommonOptions {
+  /** JPEG quality 0–1. Default: 0.9. */
+  jpegQuality?: number;
+  /** How the result is delivered. Default: 'base64'. */
+  output?: ScanOutput;
+}
+
+interface ScanOptions extends CommonOptions {
+  /** Whether the camera auto-captures on stable framing. Default: true. */
+  autoShutter?: boolean;
+  /** Stable-framing dwell before auto-shutter fires, in ms. Default: 1500. */
+  autoShutterMs?: number;
+  /** Overlay fill/stroke color, #RRGGBB. Default: '#FFFF00'. */
+  overlayColor?: string;
+  /** Overlay fill opacity 0–1 (stroke is always full). Default: 0.25. */
+  overlayOpacity?: number;
+}
+
+type CropOptions = CommonOptions;
+```
+
+### `output: 'fileUri'`
+
+When set, the JPEG is written to a fixed path and returned as a `file://` URI:
+
+- **iOS**: `<NSCachesDirectory>/expo-document-scanner/scan.jpg`
+- **Android**: `<context.cacheDir>/expo-document-scanner/scan.jpg`
+
+Each call **overwrites the previous file**. There's only ever one scan on disk at a time — no cleanup logic in your app, no file accumulation. iOS will purge the caches directory under disk pressure if the app is backgrounded; Android does the same.
 
 ### `CropResult`
 
 ```ts
 interface CropResult {
   detected: boolean;
-  base64: string; // JPEG bytes, base64-encoded
+  /** Base64-encoded JPEG. Empty when `output: 'fileUri'`. */
+  base64: string;
+  /** file:// URI of the JPEG. Empty when `output: 'base64'`. */
+  uri: string;
 }
 ```
+
+Both `base64` and `uri` are always present on success — only one is non-empty depending on the requested `output` mode.
 
 ## Platform behavior
 
