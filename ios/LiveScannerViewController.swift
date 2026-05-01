@@ -105,9 +105,13 @@ final class LiveScannerViewController: UIViewController {
     videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "expo-document-scanner.video"))
     if session.canAddOutput(videoOutput) {
       session.addOutput(videoOutput)
-      // Keep frames upright so the overlay math stays simple
-      if let conn = videoOutput.connection(with: .video), conn.isVideoOrientationSupported {
-        conn.videoOrientation = .portrait
+      // Keep frames upright so the overlay math stays simple. The
+      // videoOrientation property is deprecated and silently no-ops on iOS
+      // 17+, leaving frames in the camera's native landscape — which then
+      // skews the on-screen overlay against the portrait preview. Use
+      // videoRotationAngle on iOS 17+ to actually rotate the buffer.
+      if let conn = videoOutput.connection(with: .video) {
+        Self.applyPortraitOrientation(to: conn)
       }
     }
 
@@ -122,10 +126,29 @@ final class LiveScannerViewController: UIViewController {
   private func setupPreview() {
     previewLayer = AVCaptureVideoPreviewLayer(session: session)
     previewLayer.videoGravity = .resizeAspectFill
-    if let conn = previewLayer.connection, conn.isVideoOrientationSupported {
-      conn.videoOrientation = .portrait
+    if let conn = previewLayer.connection {
+      Self.applyPortraitOrientation(to: conn)
     }
     view.layer.addSublayer(previewLayer)
+  }
+
+  /// Rotates the connection's output to portrait, using whichever API is
+  /// available for the running iOS version. videoOrientation is deprecated
+  /// on iOS 17+ and silently no-ops there; videoRotationAngle is the
+  /// replacement. Without this both APIs, the preview and the video buffer
+  /// can disagree on orientation, which skews the overlay against the
+  /// document.
+  private static func applyPortraitOrientation(to connection: AVCaptureConnection) {
+    if #available(iOS 17.0, *) {
+      let portraitAngle: CGFloat = 90
+      if connection.isVideoRotationAngleSupported(portraitAngle) {
+        connection.videoRotationAngle = portraitAngle
+        return
+      }
+    }
+    if connection.isVideoOrientationSupported {
+      connection.videoOrientation = .portrait
+    }
   }
 
   private func setupOverlay() {
