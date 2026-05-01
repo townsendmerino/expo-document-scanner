@@ -32,10 +32,13 @@ final class LiveScannerViewController: UIViewController {
   private var hasCaptured = false
 
   /// Auto-shutter triggers after this many consecutive stable frames.
-  /// At ~30fps, 24 frames ≈ 0.8 seconds.
-  private let stableFramesForAutoCapture = 24
+  /// At ~30fps, 45 frames ≈ 1.5 seconds — long enough that users have time
+  /// to deliberately frame the document, short enough that it doesn't feel
+  /// stuck. Tunable.
+  private let stableFramesForAutoCapture = 45
   /// Per-corner tolerance (in normalized [0,1] space) for "still stable".
-  private let stabilityTolerance: CGFloat = 0.02
+  /// Smaller values demand a steadier hand before auto-shutter fires.
+  private let stabilityTolerance: CGFloat = 0.015
 
   // MARK: UI
 
