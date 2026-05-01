@@ -65,11 +65,6 @@ public class ExpoDocumentScannerModule: Module {
           return
         }
 
-        guard let rootVC = Self.topViewController() else {
-          promise.reject("NO_ROOT_VC", "Could not find a view controller to present from")
-          return
-        }
-
         if self.activeScanner != nil {
           promise.reject("ALREADY_RUNNING", "A document scan is already in progress")
           return
@@ -111,9 +106,79 @@ public class ExpoDocumentScannerModule: Module {
         }
 
         self.activeScanner = scanner
-        rootVC.present(scanner, animated: true)
+
+        // Try to present. The presenter VC may not be ready immediately
+        // (during a modal swap from review→capture, react-native-modal's
+        // RCTFabricModalHostViewController is briefly in memory but not
+        // yet in the window hierarchy). Retry briefly until we find a
+        // valid presenter.
+        Self.presentScannerWithRetry(scanner, attempt: 0) { [weak self] success in
+          if !success {
+            self?.activeScanner = nil
+            promise.reject("NO_PRESENTER", "Could not find a valid view controller to present scanner")
+          }
+        }
       }
     }
+  }
+
+  // MARK: - Scanner presentation (retry-aware)
+
+  /// Polls every 50ms for up to ~1 second waiting for a topmost view
+  /// controller whose view is actually in the window hierarchy and which
+  /// has no current presented VC. Once found, presents the scanner from
+  /// it. Calls `completion(success: false)` if no valid presenter is found
+  /// within the retry budget.
+  private static func presentScannerWithRetry(
+    _ scanner: UIViewController,
+    attempt: Int,
+    completion: @escaping (Bool) -> Void
+  ) {
+    if let presenter = topValidPresenter() {
+      presenter.present(scanner, animated: true) {
+        completion(true)
+      }
+      return
+    }
+    if attempt >= 20 {
+      completion(false)
+      return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+      presentScannerWithRetry(scanner, attempt: attempt + 1, completion: completion)
+    }
+  }
+
+  /// Walk the presented-VC chain starting from the key window's root,
+  /// stopping at any VC whose view isn't in the window hierarchy (those
+  /// are stale references — usually mid-transition modals). Returns nil
+  /// if the deepest valid VC already has a presented VC (we can't double-
+  /// present from one VC).
+  private static func topValidPresenter() -> UIViewController? {
+    let keyWindow = UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .flatMap { $0.windows }
+      .first(where: { $0.isKeyWindow })
+
+    guard let rootVC = keyWindow?.rootViewController,
+          rootVC.viewIfLoaded?.window != nil else {
+      return nil
+    }
+
+    var top: UIViewController = rootVC
+    while let presented = top.presentedViewController,
+          presented.viewIfLoaded?.window != nil {
+      top = presented
+    }
+
+    // If the deepest valid VC already has a (stale) presented child, we
+    // can't present from it — UIKit only allows one presented VC at a
+    // time. Returning nil triggers the retry loop, which gives the stale
+    // VC time to be released.
+    if top.presentedViewController != nil {
+      return nil
+    }
+    return top
   }
 
   // MARK: - Vision pipeline (shared between cropDocument and scanDocument)
@@ -286,20 +351,6 @@ public class ExpoDocumentScannerModule: Module {
     return max(0.0, min(1.0, x))
   }
 
-  /// Walks the active key window's view controller chain to find the topmost
-  /// presented controller — that's what we present the camera from.
-  private static func topViewController() -> UIViewController? {
-    let keyWindow = UIApplication.shared.connectedScenes
-      .compactMap { $0 as? UIWindowScene }
-      .flatMap { $0.windows }
-      .first(where: { $0.isKeyWindow })
-
-    var top = keyWindow?.rootViewController
-    while let presented = top?.presentedViewController {
-      top = presented
-    }
-    return top
-  }
 }
 
 // MARK: - UIImage orientation normalization
